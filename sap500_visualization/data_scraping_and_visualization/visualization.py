@@ -135,6 +135,11 @@ last_graph_type = "Heatmap"
 last_data_processing_state = "none"
 last_sort_by_state = "Default"
 
+# Correlation filter states
+last_corr_ref_state = "NONE"
+last_corr_pos_state = 0.5
+last_corr_neg_state = -0.5
+
 chosen_aggregation = "Mean"
 aggregation_functions_map = {"Mean": np.mean, "Median": np.median, "Max": np.max, "Min": np.min, "Std": np.std}
 metric = "Price"
@@ -855,6 +860,31 @@ def main():
                     style={"marginBottom": "1rem"}
                 ),
 
+                # --- NEW CORRELATION FILTER SECTION ---
+                html.P("Correlation Filter:", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
+                dcc.Dropdown(
+                    id="corr_reference_stock",
+                    options=[{"label": "None (Disable)", "value": "NONE"}] + initial_stock_options,
+                    value="NONE",
+                    clearable=False,
+                    persistence=True,
+                    persistence_type='local',
+                    style={"marginBottom": "0.5rem"}
+                ),
+                html.Div([
+                    html.Div([
+                        html.P("Keep >=", style={"marginBottom": "0.2rem", "fontSize": "0.85rem"}),
+                        dcc.Input(id="corr_pos_threshold", type="number", min=-1.0, max=1.0, step=0.05, value=0.5,
+                                  style={"width": "100%"})
+                    ], style={"width": "48%"}),
+                    html.Div([
+                        html.P("Keep <=", style={"marginBottom": "0.2rem", "fontSize": "0.85rem"}),
+                        dcc.Input(id="corr_neg_threshold", type="number", min=-1.0, max=1.0, step=0.05, value=-0.5,
+                                  style={"width": "100%"})
+                    ], style={"width": "48%"})
+                ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "1.5rem"}),
+                # --------------------------------------
+
                 html.P("Filter by Category (Sector):",
                        style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
                 dcc.Dropdown(
@@ -1019,6 +1049,9 @@ def main():
         Input("tsne_perplexity", "value"),
         Input("umap_neighbors", "value"),
         Input("umap_min_dist", "value"),
+        State("corr_reference_stock", "value"),
+        State("corr_pos_threshold", "value"),
+        State("corr_neg_threshold", "value"),
         State("metric_dropdown", "value"),
         State("aggregation_dropdown", "value"),
         State("time_window_input", "value"),
@@ -1026,8 +1059,10 @@ def main():
     )
     def update_bottom_graph(btn_clicks, selected_graph_type, data_processing, selected_timeseries, sort_by,
                             tsne_perp, umap_neigh, umap_dist,
+                            corr_ref_stock, corr_pos, corr_neg,
                             selected_metric, selected_aggregation, selected_time_window, bottom_fig):
         global last_update_bottom_graph_click_count, last_graph_type, last_data_processing_state, last_sort_by_state
+        global last_corr_ref_state, last_corr_pos_state, last_corr_neg_state
         updated = False
 
         ctx = dash.callback_context
@@ -1040,13 +1075,23 @@ def main():
             return dash.no_update
 
         # Avoid redundant rendering if button is clicked but no states have actually changed
-        if trigger_id == "update_bottom_graph_button" and last_update_bottom_graph_click_count == btn_clicks and selected_graph_type == last_graph_type and data_processing == last_data_processing_state and sort_by == last_sort_by_state:
+        if (trigger_id == "update_bottom_graph_button" and
+                last_update_bottom_graph_click_count == btn_clicks and
+                selected_graph_type == last_graph_type and
+                data_processing == last_data_processing_state and
+                sort_by == last_sort_by_state and
+                corr_ref_stock == last_corr_ref_state and
+                corr_pos == last_corr_pos_state and
+                corr_neg == last_corr_neg_state):
             return dash.no_update
 
         last_update_bottom_graph_click_count = btn_clicks
         last_graph_type = selected_graph_type
         last_data_processing_state = data_processing
         last_sort_by_state = sort_by
+        last_corr_ref_state = corr_ref_stock
+        last_corr_pos_state = corr_pos
+        last_corr_neg_state = corr_neg
 
         selected_time_window_sec = selected_time_window * MINUTE_SEC
         new_z, new_x = aggregate_data(all_data, metric=selected_metric,
@@ -1063,17 +1108,53 @@ def main():
             filtered_names = [names[i] for i in selected_indices]
             filtered_z = np.array(new_z)[selected_indices]
 
+            # --- APPLIED CORRELATION FILTER ---
+            if corr_ref_stock and corr_ref_stock != "NONE" and corr_ref_stock in names:
+                ref_idx = names.index(corr_ref_stock)
+                ref_z = np.array(new_z)[ref_idx]
+
+                # Adding microscopic random noise prevents division-by-zero NaNs in perfectly flat data segments
+                ref_z_filled = np.nan_to_num(ref_z, nan=0.0) + np.random.normal(0, 1e-9, ref_z.shape)
+
+                new_filtered_names = []
+                new_filtered_z = []
+
+                # Ensure correlation inputs are floats (handling empty/None inputs safely)
+                c_pos = float(corr_pos) if corr_pos is not None else 1.1  # 1.1 never matches (corr max is 1.0)
+                c_neg = float(corr_neg) if corr_neg is not None else -1.1  # -1.1 never matches (corr min is -1.0)
+
+                for i, name in enumerate(filtered_names):
+                    # Always explicitly keep the reference stock in the visual graph
+                    if name == corr_ref_stock:
+                        new_filtered_names.append(name)
+                        new_filtered_z.append(filtered_z[i])
+                        continue
+
+                    target_z_filled = np.nan_to_num(filtered_z[i], nan=0.0) + np.random.normal(0, 1e-9,
+                                                                                               filtered_z[i].shape)
+
+                    # Compute Pearson correlation
+                    corr = np.corrcoef(ref_z_filled, target_z_filled)[0, 1]
+
+                    # Filter condition (Positive OR Negative)
+                    if corr >= c_pos or corr <= c_neg:
+                        new_filtered_names.append(name)
+                        new_filtered_z.append(filtered_z[i])
+
+                filtered_names = new_filtered_names
+                filtered_z = np.array(new_filtered_z) if new_filtered_z else np.array([])
+            # ----------------------------------
+
             # --- APPLIED SORTING ALGORITHMS ---
-            if sort_by == "Alphabetical (A-Z)":
+            if sort_by == "Alphabetical (A-Z)" and len(filtered_z) > 0:
                 sort_idx = np.argsort(filtered_names)
                 filtered_names = [filtered_names[i] for i in sort_idx]
                 filtered_z = filtered_z[sort_idx]
-            elif sort_by == "Alphabetical (Z-A)":
+            elif sort_by == "Alphabetical (Z-A)" and len(filtered_z) > 0:
                 sort_idx = np.argsort(filtered_names)[::-1]
                 filtered_names = [filtered_names[i] for i in sort_idx]
                 filtered_z = filtered_z[sort_idx]
             elif sort_by == "Correlation" and len(filtered_z) > 1:
-                # Adding microscopic random noise prevents division-by-zero NaNs in perfectly flat data segments
                 z_filled = np.nan_to_num(filtered_z, nan=0.0) + np.random.normal(0, 1e-9, filtered_z.shape)
 
                 # Greedy path sorting algorithm (Finds closest matching neighbor sequentially)
