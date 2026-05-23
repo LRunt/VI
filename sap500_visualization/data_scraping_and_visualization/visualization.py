@@ -17,18 +17,22 @@ import dash_bootstrap_components as dbc
 # --- Optional import for UMAP ---
 try:
     import umap
+
     UMAP_AVAILABLE = True
 except ImportError:
     UMAP_AVAILABLE = False
-    print("Warning: 'umap-learn' is not installed. UMAP clustering will be disabled. Run 'pip install umap-learn' to enable.")
+    print(
+        "Warning: 'umap-learn' is not installed. UMAP clustering will be disabled. Run 'pip install umap-learn' to enable.")
 
 # --- Optional import for t-SNE ---
 try:
     from sklearn.manifold import TSNE
+
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
-    print("Warning: 'scikit-learn' is not installed. t-SNE clustering will be disabled. Run 'pip install scikit-learn' to enable.")
+    print(
+        "Warning: 'scikit-learn' is not installed. t-SNE clustering will be disabled. Run 'pip install scikit-learn' to enable.")
 
 # --- Data Loading Logic ---
 
@@ -830,7 +834,8 @@ def main():
                                                                 {"label": " Correlation Matrix",
                                                                  "value": "Correlation Matrix"},
                                                                 {"label": " UMAP Clusters", "value": "UMAP Clusters"},
-                                                                {"label": " t-SNE Clusters", "value": "t-SNE Clusters"}],
+                                                                {"label": " t-SNE Clusters",
+                                                                 "value": "t-SNE Clusters"}],
                              value="Heatmap", clearable=False, persistence=True, persistence_type='local',
                              style={"marginBottom": "1rem"}),
 
@@ -1175,7 +1180,44 @@ def main():
                             }
                         }
                     }
-                    Plotly.restyle(plot, update);
+
+                    Plotly.restyle(plot, update).then(() => {
+                        // Apply SVG re-ordering exclusively to 2D Line Charts (not 3D, not clusters)
+                        if (isCluster || traceCount === 0 || plot.data[0].type === 'scatter3d') {
+                            return; 
+                        }
+
+                        const scatterLayer = plot.querySelector('.scatterlayer');
+                        if (scatterLayer) {
+                            const traces = Array.from(scatterLayer.querySelectorAll('.trace.scatter'));
+
+                            // Map UIDs to trace indices to safely identify shuffled DOM nodes
+                            const uidToIndex = {};
+                            (plot._fullData || plot.data).forEach((t, idx) => {
+                                if (t.uid) uidToIndex[t.uid] = idx;
+                            });
+
+                            traces.forEach(node => {
+                                const className = node.getAttribute('class') || '';
+                                let originalIdx = -1;
+
+                                for (let uid in uidToIndex) {
+                                    if (className.includes(uid)) {
+                                        originalIdx = uidToIndex[uid];
+                                        break;
+                                    }
+                                }
+
+                                if (originalIdx !== -1) {
+                                    const isActive = plot._selectedTraces.has(originalIdx) || originalIdx === hoveredIndex;
+                                    if (isActive) {
+                                        // Appending to the parent pushes the active SVG element to the visual foreground
+                                        scatterLayer.appendChild(node);
+                                    }
+                                }
+                            });
+                        }
+                    });
                 }
 
                 function attachLegendEvents() {
