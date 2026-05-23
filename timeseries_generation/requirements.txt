@@ -1,0 +1,9 @@
+dash
+dash-bootstrap-components
+pandas
+numpy
+plotly
+plotly-resampler
+scikit-learn
+umap-learn
+networkx
