@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import datetime
 
+import plotly.express as px
 import plotly.graph_objects as go
 import plotly_resampler
 from plotly_resampler import FigureResampler
@@ -13,6 +14,22 @@ from plotly_resampler import FigureResampler
 import dash
 from dash import Dash, dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
+
+# --- Optional import for UMAP ---
+try:
+    import umap
+    UMAP_AVAILABLE = True
+except ImportError:
+    UMAP_AVAILABLE = False
+    print("Warning: 'umap-learn' is not installed. UMAP clustering will be disabled. Run 'pip install umap-learn' to enable.")
+
+# --- Optional import for t-SNE ---
+try:
+    from sklearn.manifold import TSNE
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    print("Warning: 'scikit-learn' is not installed. t-SNE clustering will be disabled. Run 'pip install scikit-learn' to enable.")
 
 # --- Data Loading Logic ---
 
@@ -149,6 +166,11 @@ timestamps_graph_labels = None
 last_update_bottom_graph_click_count = None
 last_graph_type = "Heatmap"
 last_data_processing_state = "normalize"
+last_sort_by_state = "Default"
+
+# Correlation filter states
+last_corr_ref_state = "NONE"
+last_corr_range_state = [0.5, 1.0]
 
 chosen_aggregation = "Mean"
 aggregation_functions_map = {
@@ -172,6 +194,12 @@ metric_descriptions_map = {
 time_window_aggregation = 60
 
 
+def get_category(name):
+    """Extracts a pseudo-sector/category from the parsed filename format (date_marketSegment_security)"""
+    parts = name.split("_")
+    return parts[-1] if len(parts) >= 3 else "Unknown"
+
+
 def normalize_data(z_data):
     normalized_z = []
     for row in z_data:
@@ -181,7 +209,7 @@ def normalize_data(z_data):
         if max_val > min_val:
             norm_arr = (arr - min_val) / (max_val - min_val)
         else:
-            norm_arr = np.zeros_like(arr)
+            norm_arr = np.zeros_like(arr) + 0.5
         normalized_z.append(norm_arr)
     return normalized_z
 
@@ -203,11 +231,48 @@ def pct_change_data(z_data):
     return pct_z
 
 
+def calculate_nice_ticks(vmin, vmax, target_ticks=5):
+    if np.isnan(vmin) or np.isnan(vmax) or vmin == vmax:
+        return vmin, vmax, [vmin], [f"{vmin:.2f}"]
+
+    span = vmax - vmin
+    rough_step = span / (target_ticks - 1)
+    mag = 10 ** math.floor(math.log10(rough_step)) if rough_step > 0 else 1
+    rel_step = rough_step / mag
+
+    if rel_step < 1.5:
+        nice_step = 1 * mag
+    elif rel_step < 3.5:
+        nice_step = 2 * mag
+    elif rel_step < 7.5:
+        nice_step = 5 * mag
+    else:
+        nice_step = 10 * mag
+
+    padded_min = math.floor(vmin / nice_step) * nice_step
+    padded_max = math.ceil(vmax / nice_step) * nice_step
+
+    ticks = np.arange(padded_min, padded_max + nice_step * 0.1, nice_step).tolist()
+
+    def format_tick(val):
+        val = round(val, 6)
+        if val.is_integer():
+            return str(int(val))
+        elif nice_step >= 0.1:
+            return f"{val:.1f}"
+        elif nice_step >= 0.01:
+            return f"{val:.2f}"
+        else:
+            return f"{val:.4f}"
+
+    labels = [format_tick(t) for t in ticks]
+    return padded_min, padded_max, ticks, labels
+
+
 def create_price_graph(timestamps, ask_prices, bid_prices, imbalance_indices, freqs, cancels, name, detected_anomalies,
                        how_many_x_ticks=75):
     global timestamps_graph_labels
-    timestamps_graph_labels = [datetime.datetime.fromtimestamp(int(ts) / 1e9 - HOUR_SEC).strftime("%H:%M:%S.%f") for ts
-                               in timestamps]
+    timestamps_graph_labels = [datetime.datetime.fromtimestamp(int(ts) / 1e9 - HOUR_SEC).strftime("%H:%M:%S.%f") for ts in timestamps]
     timestamps_graph = list(range(len(timestamps_graph_labels)))
     tickvals = list(range(0, len(timestamps), max(1, len(timestamps) // how_many_x_ticks)))
     ticklabels = [timestamps_graph_labels[i] for i in tickvals]
@@ -297,7 +362,8 @@ def create_price_graph(timestamps, ask_prices, bid_prices, imbalance_indices, fr
     return price_graph_fig
 
 
-def create_bottom_figure(z_data, x_data, y_names, graph_type, metric_name, agg_name, data_processing="none"):
+def create_bottom_figure(z_data, x_data, y_names, graph_type, metric_name, agg_name, data_processing="none",
+                         tsne_perp=30, umap_neigh=15, umap_dist=0.1):
     fig = go.Figure()
     title_text = f"{agg_name} of {metric_name} ({graph_type})"
 
@@ -310,212 +376,286 @@ def create_bottom_figure(z_data, x_data, y_names, graph_type, metric_name, agg_n
     else:
         value_title = "Value"
 
+    num_series = max(1, len(y_names))
     if graph_type == "Heatmap":
-        fig.add_trace(
-            go.Heatmap(
-                z=z_data, x=x_data, y=y_names, colorscale="Viridis",
-                colorbar=dict(), hoverongaps=False, zmin=np.nanmin(z_data) if len(z_data) else 0,
-                zmax=np.nanmax(z_data) if len(z_data) else 1,
-            )
-        )
-        fig.update_layout(
-            title=title_text, xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
-            yaxis={"title": "Day/Product"}, clickmode="event+select", hovermode="x unified", plot_bgcolor="#f9f9f9"
-        )
+        fig_height = max(400, num_series * 20 + 150)
+    elif graph_type in ["Horizon Chart", "Spark Line"]:
+        fig_height = max(500, num_series * 35 + 150)
+    else:
+        fig_height = 700
+
+    if graph_type == "Heatmap":
+        valid_z = np.array(z_data, dtype=float)
+        valid_z = valid_z[~np.isnan(valid_z)]
+        z_min = np.nanmin(valid_z) if len(valid_z) else 0
+        z_max = np.nanmax(valid_z) if len(valid_z) else 1
+
+        padded_min, padded_max, tickvals, ticktext = calculate_nice_ticks(z_min, z_max, target_ticks=5)
+
+        fig.add_trace(go.Heatmap(
+            z=z_data, x=x_data, y=y_names,
+            colorscale="Viridis", zmin=padded_min, zmax=padded_max,
+            colorbar=dict(title=value_title, thickness=15, outlinewidth=0, lenmode="pixels", len=250,
+                          yanchor="top", y=1, tickmode="array", tickvals=tickvals, ticktext=ticktext),
+            hoverongaps=False
+        ))
+        fig.update_layout(title=title_text, height=fig_height,
+                          xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
+                          yaxis={"title": "Day/Product", "range": [-0.5, max(1, len(y_names)) - 0.5]},
+                          clickmode="event+select", hovermode="x unified", plot_bgcolor="#f9f9f9")
+
+    elif graph_type == "Correlation Matrix":
+        z_safe = np.nan_to_num(z_data, nan=0.0) + np.random.normal(0, 1e-9, np.array(z_data).shape)
+        corr_matrix = np.corrcoef(z_safe)
+
+        fig.add_trace(go.Heatmap(
+            z=corr_matrix, x=y_names, y=y_names,
+            colorscale="RdBu", zmin=-1, zmax=1, zmid=0,
+            colorbar=dict(title="Correlation", tickmode="array", tickvals=[-1, -0.5, 0, 0.5, 1],
+                          ticktext=["-1.0", "-0.5", "0.0", "0.5", "1.0"]),
+            hoverongaps=False,
+            hovertemplate="Product X: %{x}<br>Product Y: %{y}<br>Correlation: %{z:.3f}<extra></extra>"
+        ))
+        fig.update_layout(title=f"Correlation Matrix of {metric_name} ({agg_name})", height=800,
+                          xaxis={"title": "Day/Product", "tickangle": -45},
+                          yaxis={"title": "Day/Product", "autorange": "reversed"},
+                          plot_bgcolor="#f9f9f9", margin=dict(l=80, b=80))
+
+    elif graph_type == "UMAP Clusters":
+        if not UMAP_AVAILABLE:
+            fig.add_annotation(text="Missing Library: pip install umap-learn", xref="paper", yref="paper", x=0.5, y=0.5,
+                               showarrow=False, font=dict(size=20, color="red"))
+            return fig
+        if len(y_names) < 3:
+            fig.add_annotation(text="Please select at least 3 items for UMAP clustering.", xref="paper", yref="paper",
+                               x=0.5, y=0.5, showarrow=False, font=dict(size=18))
+            return fig
+
+        z_safe = np.nan_to_num(z_data, nan=0.0)
+        n_neighbors = min(umap_neigh, max(2, len(y_names) - 1))
+        reducer = umap.UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=umap_dist, random_state=42)
+        embedding = reducer.fit_transform(z_safe)
+
+        unique_sectors = sorted(list(set([get_category(name) for name in y_names])))
+        for sector in unique_sectors:
+            sector_indices = [idx for idx, name in enumerate(y_names) if get_category(name) == sector]
+            fig.add_trace(go.Scatter(
+                x=embedding[sector_indices, 0], y=embedding[sector_indices, 1],
+                mode="markers+text", name=sector, text=[y_names[idx] for idx in sector_indices],
+                textposition="top center", textfont=dict(size=10, color="rgba(0,0,0,0.6)"),
+                marker=dict(size=12, line=dict(width=1, color='White')),
+                customdata=[y_names[idx] for idx in sector_indices],
+                hovertemplate="<b>%{customdata}</b><br>Category: " + sector + "<br>UMAP-1: %{x:.2f}<br>UMAP-2: %{y:.2f}<extra></extra>"
+            ))
+        fig.update_layout(title=f"UMAP Projection (neighbors={n_neighbors}, min_dist={umap_dist:.2f})", height=800,
+                          xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+                          yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+                          plot_bgcolor="#f9f9f9", hovermode="closest",
+                          legend=dict(title="Categories", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
+                                      itemclick=False, itemdoubleclick=False))
+
+    elif graph_type == "t-SNE Clusters":
+        if not SKLEARN_AVAILABLE:
+            fig.add_annotation(text="Missing Library: pip install scikit-learn", xref="paper", yref="paper", x=0.5,
+                               y=0.5, showarrow=False, font=dict(size=20, color="red"))
+            return fig
+        if len(y_names) < 3:
+            fig.add_annotation(text="Please select at least 3 items for t-SNE clustering.", xref="paper", yref="paper",
+                               x=0.5, y=0.5, showarrow=False, font=dict(size=18))
+            return fig
+
+        z_safe = np.nan_to_num(z_data, nan=0.0)
+        perplexity_val = min(tsne_perp, max(1, len(y_names) - 1))
+        tsne_model = TSNE(n_components=2, perplexity=perplexity_val, random_state=42, init='pca', learning_rate='auto')
+        embedding = tsne_model.fit_transform(z_safe)
+
+        unique_sectors = sorted(list(set([get_category(name) for name in y_names])))
+        for sector in unique_sectors:
+            sector_indices = [idx for idx, name in enumerate(y_names) if get_category(name) == sector]
+            fig.add_trace(go.Scatter(
+                x=embedding[sector_indices, 0], y=embedding[sector_indices, 1],
+                mode="markers+text", name=sector, text=[y_names[idx] for idx in sector_indices],
+                textposition="top center", textfont=dict(size=10, color="rgba(0,0,0,0.6)"),
+                marker=dict(size=12, line=dict(width=1, color='White')),
+                customdata=[y_names[idx] for idx in sector_indices],
+                hovertemplate="<b>%{customdata}</b><br>Category: " + sector + "<br>t-SNE-1: %{x:.2f}<br>t-SNE-2: %{y:.2f}<extra></extra>"
+            ))
+        fig.update_layout(title=f"t-SNE Projection (perplexity={perplexity_val})", height=800,
+                          xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+                          yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
+                          plot_bgcolor="#f9f9f9", hovermode="closest",
+                          legend=dict(title="Categories", orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
+                                      itemclick=False, itemdoubleclick=False))
 
     elif graph_type == "3D Lines":
+        vibrant_palette = px.colors.qualitative.Plotly * 10
         for i, name in enumerate(y_names):
-            fig.add_trace(
-                go.Scatter3d(
-                    x=x_data, y=[name] * len(x_data), z=z_data[i], name=name,
-                    mode="lines", line=dict(width=4), customdata=[name] * len(x_data)
-                )
-            )
-        fig.update_layout(
-            title=title_text,
-            scene=dict(
-                xaxis=dict(title="Time", range=[len(x_data) - 0.5, -0.5], autorange="reversed"),
-                yaxis=dict(title="Day/Product"),
-                zaxis=dict(title=value_title)
-            ),
-            clickmode="event+select", plot_bgcolor="#f9f9f9", margin=dict(l=0, r=0, b=0, t=40), showlegend=False
-        )
+            fig.add_trace(go.Scatter3d(
+                x=x_data, y=[name] * len(x_data), z=z_data[i], name=name, mode="lines",
+                line=dict(width=4, color=vibrant_palette[i]), customdata=[name] * len(x_data)
+            ))
+        fig.update_layout(title=title_text, height=fig_height,
+                          scene=dict(xaxis=dict(title="Time", range=[len(x_data) - 0.5, -0.5], autorange="reversed"),
+                                     yaxis=dict(title="Day/Product"), zaxis=dict(title=value_title)),
+                          clickmode="event+select", plot_bgcolor="#f9f9f9", margin=dict(l=0, r=0, b=0, t=40),
+                          showlegend=True,
+                          legend={"orientation": "v", "yanchor": "top", "y": 1, "xanchor": "left", "x": 1.02,
+                                  "itemclick": False, "itemdoubleclick": False})
 
     elif graph_type == "Horizon Chart":
         num_bands = 5
         pos_colors = ["#c6dbef", "#9ecae1", "#6baed6", "#3182bd", "#08519c"]
         neg_colors = ["#fcbba1", "#fc9272", "#fb6a4a", "#de2d26", "#a50f15"]
 
-        max_abs = np.nanmax(np.abs(z_data)) if len(z_data) else 1
-        if max_abs == 0 or np.isnan(max_abs):
-            max_abs = 1
+        valid_z = z_data[~np.isnan(z_data)] if len(z_data) else []
+        actual_max_abs = np.nanmax(np.abs(valid_z)) if len(valid_z) else 1
+        if actual_max_abs == 0 or np.isnan(actual_max_abs): actual_max_abs = 1
 
-        band_size = max_abs / num_bands
+        _, padded_max_abs, pos_ticks, pos_labels = calculate_nice_ticks(0, actual_max_abs, 4)
+        band_size = padded_max_abs / num_bands
 
         for i, name in enumerate(y_names):
             z = np.array(z_data[i], dtype=float)
             z_safe = np.nan_to_num(z, nan=0.0)
             custom_data_arr = [name] * len(x_data)
 
-            fig.add_trace(go.Scatter(
-                x=x_data, y=[i + 0.5] * len(x_data),
-                mode="lines", line=dict(color='rgba(0,0,0,0)', width=1),
-                name=name, customdata=custom_data_arr,
-                text=[f"{val:.4f}" if not np.isnan(val) else "NaN" for val in z],
-                hovertemplate="%{customdata} - Value: %{text}<extra></extra>",
-                hoverinfo="all", showlegend=False
-            ))
+            fig.add_trace(
+                go.Scatter(x=x_data, y=[i + 0.5] * len(x_data), mode="lines", line=dict(color='rgba(0,0,0,0)', width=1),
+                           name=name, customdata=custom_data_arr, cliponaxis=False,
+                           text=[f"{val:.4f}" if not np.isnan(val) else "NaN" for val in z],
+                           hovertemplate="<b>%{customdata}</b><br>Time: %{x}<br>Value: %{text}<extra></extra>",
+                           hoverinfo="all", showlegend=False))
 
             for b in range(num_bands):
                 pos_vals = np.clip(z_safe - b * band_size, 0, band_size)
-                y_pos = i + (pos_vals / band_size)
-
-                fig.add_trace(go.Scatter(
-                    x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
-                    customdata=custom_data_arr
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_data, y=y_pos, mode="lines", fill="tonexty", fillcolor=pos_colors[b],
-                    line=dict(width=0.5, color=pos_colors[b]), showlegend=False, hoverinfo="skip",
-                    customdata=custom_data_arr
-                ))
+                fig.add_trace(
+                    go.Scatter(x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=0), showlegend=False,
+                               hoverinfo="skip", customdata=custom_data_arr, cliponaxis=False))
+                fig.add_trace(go.Scatter(x=x_data, y=i + (pos_vals / band_size), mode="lines", fill="tonexty",
+                                         fillcolor=pos_colors[b], line=dict(width=0), showlegend=False,
+                                         hoverinfo="skip", customdata=custom_data_arr, cliponaxis=False))
 
                 neg_vals = np.clip(-z_safe - b * band_size, 0, band_size)
-                y_neg = i + (neg_vals / band_size)
+                fig.add_trace(
+                    go.Scatter(x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=0), showlegend=False,
+                               hoverinfo="skip", customdata=custom_data_arr, cliponaxis=False))
+                fig.add_trace(go.Scatter(x=x_data, y=i + (neg_vals / band_size), mode="lines", fill="tonexty",
+                                         fillcolor=neg_colors[b], line=dict(width=0), showlegend=False,
+                                         hoverinfo="skip", customdata=custom_data_arr, cliponaxis=False))
 
-                fig.add_trace(go.Scatter(
-                    x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
-                    customdata=custom_data_arr
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_data, y=y_neg, mode="lines", fill="tonexty", fillcolor=neg_colors[b],
-                    line=dict(width=0.5, color=neg_colors[b]), showlegend=False, hoverinfo="skip",
-                    customdata=custom_data_arr
-                ))
+            fig.add_trace(go.Scatter(x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=1, color="#444444"),
+                                     showlegend=False, hoverinfo="skip", customdata=custom_data_arr, cliponaxis=False))
 
-        cscale = []
-        for i in range(num_bands):
-            idx = num_bands - 1 - i
-            cscale.append([i / (2 * num_bands), neg_colors[idx]])
-            cscale.append([(i + 1) / (2 * num_bands), neg_colors[idx]])
-        for i in range(num_bands):
-            cscale.append([(num_bands + i) / (2 * num_bands), pos_colors[i]])
-            cscale.append([(num_bands + i + 1) / (2 * num_bands), pos_colors[i]])
+        custom_colorscale = [[0.0, neg_colors[4]], [0.1, neg_colors[4]], [0.1, neg_colors[3]], [0.2, neg_colors[3]],
+                             [0.2, neg_colors[2]], [0.3, neg_colors[2]], [0.3, neg_colors[1]], [0.4, neg_colors[1]],
+                             [0.4, neg_colors[0]], [0.5, neg_colors[0]], [0.5, pos_colors[0]], [0.6, pos_colors[0]],
+                             [0.6, pos_colors[1]], [0.7, pos_colors[1]], [0.7, pos_colors[2]], [0.8, pos_colors[2]],
+                             [0.8, pos_colors[3]], [0.9, pos_colors[3]], [0.9, pos_colors[4]], [1.0, pos_colors[4]]]
+        tickvals = [-t for t in reversed(pos_ticks[1:])] + pos_ticks
+        ticktext = [f"-{l}" if l != "0" else "0" for l in reversed(pos_labels[1:])] + pos_labels
 
         fig.add_trace(go.Scatter(
             x=[None], y=[None], mode="markers",
-            marker=dict(
-                colorscale=cscale, cmin=-max_abs, cmax=max_abs,
-                showscale=True, colorbar=dict(title=value_title)
-            ),
-            showlegend=False, hoverinfo="skip"
+            marker=dict(colorscale=custom_colorscale, cmin=-padded_max_abs, cmax=padded_max_abs, showscale=True,
+                        colorbar=dict(title=value_title, thickness=15, outlinewidth=0, lenmode="pixels", len=250,
+                                      yanchor="top", y=1, tickmode="array", tickvals=tickvals, ticktext=ticktext)),
+            showlegend=False, hoverinfo="none"
         ))
-
-        fig.update_layout(
-            title=title_text,
-            xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
-            yaxis={
-                "title": "Day/Product", "tickvals": list(range(len(y_names))),
-                "ticktext": y_names, "range": [-0.5, len(y_names)]
-            },
-            clickmode="event+select", hovermode="x unified", plot_bgcolor="#f9f9f9"
-        )
+        fig.update_layout(title=title_text, height=fig_height,
+                          xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
+                          yaxis={"title": "Day/Product", "tickvals": [i + 0.5 for i in range(len(y_names))],
+                                 "ticktext": y_names, "range": [-0.5, max(1, len(y_names))], "automargin": True},
+                          clickmode="event+select", hovermode="closest", plot_bgcolor="#f9f9f9", showlegend=False,
+                          margin=dict(t=70, b=40, l=80, r=20))
 
     elif graph_type == "Spark Line":
-        max_abs = np.nanmax(np.abs(z_data)) if len(z_data) else 1
-        if max_abs == 0 or np.isnan(max_abs):
-            max_abs = 1
+        valid_z = z_data[~np.isnan(z_data)] if len(z_data) else []
+        max_abs = np.nanmax(np.abs(valid_z)) if len(valid_z) else 1
+        if max_abs == 0 or np.isnan(max_abs): max_abs = 1
 
-        line_color_pos = "#1f77b4"
-        fill_color_pos = "rgba(31, 119, 180, 0.4)"
-        line_color_neg = "#d62728"
-        fill_color_neg = "rgba(214, 39, 40, 0.4)"
+        trace_index = 0
+        data_line_indices = []
 
         for i, name in enumerate(y_names):
             z = np.array(z_data[i], dtype=float)
             custom_data_arr = [name] * len(x_data)
 
-            # 1. Invisible hover line (stays continuous for tooltips)
-            fig.add_trace(go.Scatter(
-                x=x_data, y=[i + 0.5] * len(x_data),
-                mode="lines", line=dict(color='rgba(0,0,0,0)', width=1),
-                name=name, customdata=custom_data_arr,
-                text=[f"{val:.4f}" if not np.isnan(val) else "NaN" for val in z],
-                hovertemplate="%{customdata} - Value: %{text}<extra></extra>",
-                hoverinfo="all", showlegend=False
-            ))
+            fig.add_trace(go.Scatter(x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=1, color="#444444"),
+                                     showlegend=False, hoverinfo="skip", customdata=custom_data_arr, cliponaxis=False))
+            trace_index += 1
 
-            # 2. Continuous faint grey baseline (keeps the visual row anchor intact)
-            fig.add_trace(go.Scatter(
-                x=x_data, y=[i] * len(x_data), mode="lines", line=dict(width=1, color="#dddddd"),
-                showlegend=False, hoverinfo="skip", customdata=custom_data_arr
-            ))
-
-            # 3. HIDDEN baseline with NaNs inserted exactly where z has NaNs.
             baseline_gaps = [i if not np.isnan(val) else None for val in z]
-            fig.add_trace(go.Scatter(
-                x=x_data, y=baseline_gaps, mode="lines", line=dict(width=0, color='rgba(0,0,0,0)'),
-                showlegend=False, hoverinfo="skip", customdata=custom_data_arr,
-                connectgaps=False
-            ))
-
             valid_mask = ~np.isnan(z)
+
             if np.any(valid_mask):
-                z_max = np.max(z[valid_mask])
-                z_min = np.min(z[valid_mask])
+                if np.max(z[valid_mask]) > 0:
+                    fig.add_trace(
+                        go.Scatter(x=x_data, y=baseline_gaps, mode="lines", line=dict(width=0, color='rgba(0,0,0,0)'),
+                                   showlegend=False, hoverinfo="skip", customdata=custom_data_arr, connectgaps=False,
+                                   cliponaxis=False))
+                    trace_index += 1
+                    fig.add_trace(go.Scatter(x=x_data, y=i + (
+                                np.where(np.isnan(z), np.nan, np.clip(z, 0, None)) / max_abs) * 0.45, mode="lines",
+                                             fill="tonexty", fillcolor="rgba(31, 119, 180, 0.4)", line=dict(width=0),
+                                             showlegend=False, hoverinfo="skip", customdata=custom_data_arr,
+                                             connectgaps=False, cliponaxis=False))
+                    trace_index += 1
 
-                # 4. Actual data line + fill POSITIVE
-                if z_max > 0:
-                    y_vals_pos = i + (np.where(np.isnan(z), np.nan, np.clip(z, 0, None)) / max_abs) * 0.45
-                    fig.add_trace(go.Scatter(
-                        x=x_data, y=y_vals_pos, mode="lines", fill="tonexty", fillcolor=fill_color_pos,
-                        line=dict(width=1.5, color=line_color_pos), showlegend=False, hoverinfo="skip",
-                        customdata=custom_data_arr,
-                        connectgaps=False
-                    ))
+                if np.min(z[valid_mask]) < 0:
+                    fig.add_trace(
+                        go.Scatter(x=x_data, y=baseline_gaps, mode="lines", line=dict(width=0, color='rgba(0,0,0,0)'),
+                                   showlegend=False, hoverinfo="skip", customdata=custom_data_arr, connectgaps=False,
+                                   cliponaxis=False))
+                    trace_index += 1
+                    fig.add_trace(go.Scatter(x=x_data, y=i + (
+                                np.where(np.isnan(z), np.nan, np.clip(z, None, 0)) / max_abs) * 0.45, mode="lines",
+                                             fill="tonexty", fillcolor="rgba(214, 39, 40, 0.4)", line=dict(width=0),
+                                             showlegend=False, hoverinfo="skip", customdata=custom_data_arr,
+                                             connectgaps=False, cliponaxis=False))
+                    trace_index += 1
 
-                # 5. Hidden baseline + gaps again for the negative fill (only add if we have negative data)
-                if z_min < 0:
-                    fig.add_trace(go.Scatter(
-                        x=x_data, y=baseline_gaps, mode="lines", line=dict(width=0, color='rgba(0,0,0,0)'),
-                        showlegend=False, hoverinfo="skip", customdata=custom_data_arr,
-                        connectgaps=False
-                    ))
+                real_z = np.where(np.isnan(z), np.nan, z)
+                text_vals = [f"{val:.4f}" if not np.isnan(val) else "NaN" for val in real_z]
 
-                    # 6. Actual data line + fill NEGATIVE
-                    y_vals_neg = i + (np.where(np.isnan(z), np.nan, np.clip(z, None, 0)) / max_abs) * 0.45
-                    fig.add_trace(go.Scatter(
-                        x=x_data, y=y_vals_neg, mode="lines", fill="tonexty", fillcolor=fill_color_neg,
-                        line=dict(width=1.5, color=line_color_neg), showlegend=False, hoverinfo="skip",
-                        customdata=custom_data_arr,
-                        connectgaps=False
-                    ))
+                data_line_indices.append(trace_index)
+                fig.add_trace(go.Scatter(
+                    x=x_data, y=i + (real_z / max_abs) * 0.45, mode="lines+markers",
+                    line=dict(width=1.5, color="#bbbbbb"),
+                    marker=dict(size=5, color=real_z,
+                                colorscale=[[0, '#d62728'], [0.45, '#bbbbbb'], [0.55, '#bbbbbb'], [1, '#1f77b4']],
+                                cmin=-max_abs, cmax=max_abs, showscale=False, line=dict(width=0)),
+                    name=name, text=text_vals, customdata=custom_data_arr,
+                    hovertemplate="<b>%{customdata}</b><br>Time: %{x}<br>Value: %{text}<extra></extra>",
+                    showlegend=False, hoverinfo="all", connectgaps=False, cliponaxis=False
+                ))
+                trace_index += 1
 
-        fig.update_layout(
-            title=title_text,
-            xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
-            yaxis={
-                "title": "Day/Product", "tickvals": list(range(len(y_names))),
-                "ticktext": y_names, "range": [-0.5, len(y_names)]
-            },
-            clickmode="event+select", hovermode="x unified", plot_bgcolor="#f9f9f9"
-        )
+        fig.update_layout(title=title_text, height=fig_height,
+                          xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
+                          yaxis={"title": "Day/Product", "tickvals": [i + 0.5 for i in range(len(y_names))],
+                                 "ticktext": y_names, "range": [-0.5, max(1, len(y_names))], "automargin": True},
+                          clickmode="event+select", hovermode="closest", plot_bgcolor="#f9f9f9", showlegend=False,
+                          margin=dict(t=70, b=40, l=80, r=20),
+                          updatemenus=[dict(type="buttons", direction="left", buttons=[
+                              dict(args=[{"mode": "lines"}, data_line_indices], label="Hide Markers", method="restyle"),
+                              dict(args=[{"mode": "lines+markers"}, data_line_indices], label="Show Markers",
+                                   method="restyle")], pad={"r": 10, "t": 10}, showactive=True, x=1.0, xanchor="right",
+                                            y=1.05, yanchor="bottom", bgcolor="#ffffff", bordercolor="#007bff",
+                                            font=dict(size=12, color="#007bff"))])
 
-    else:  # Line Chart
+    else:
+        vibrant_palette = px.colors.qualitative.Plotly * 10
         for i, name in enumerate(y_names):
-            fig.add_trace(
-                go.Scatter(
-                    x=x_data, y=z_data[i], name=name, mode="lines", customdata=[name] * len(x_data)
-                )
-            )
-        fig.update_layout(
-            title=title_text,
-            xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]},
-            yaxis={"title": value_title},
-            showlegend=True,
-            legend={"orientation": "v", "yanchor": "top", "y": 1, "xanchor": "left", "x": 1.02},
-            clickmode="event+select", hovermode="x unified", plot_bgcolor="#f9f9f9"
-        )
+            fig.add_trace(go.Scatter(
+                x=x_data, y=z_data[i], name=name, mode="lines", line=dict(color=vibrant_palette[i % len(vibrant_palette)]),
+                customdata=[name] * len(x_data)
+            ))
+        fig.update_layout(title=title_text, height=fig_height,
+                          xaxis={"title": "Time", "range": [-0.5, len(x_data) - 0.5]}, yaxis={"title": value_title},
+                          showlegend=True,
+                          legend={"orientation": "v", "yanchor": "top", "y": 1, "xanchor": "left", "x": 1.02,
+                                  "itemclick": False, "itemdoubleclick": False}, clickmode="event+select",
+                          hovermode="x unified", plot_bgcolor="#f9f9f9")
 
     return fig
 
@@ -544,7 +684,7 @@ def main():
     )
     placeholder_fig.register_update_graph_callback(app=app, graph_id="price_graph")
 
-    x_data_init = [f"{i // HOUR_SEC:02d}:{i % HOUR_SEC // MINUTE_SEC:02d}" for i in
+    x_data_init = [f"{int(i // HOUR_SEC):02d}:{int(i % HOUR_SEC // MINUTE_SEC):02d}" for i in
                    range(0, DAY_SEC, time_window_aggregation * MINUTE_SEC)]
 
     data_processing_init = "normalize"
@@ -565,15 +705,27 @@ def main():
         data_processing_init
     )
 
+    initial_lob_options = [{"label": n, "value": n} for n in names]
+
+    header_block = html.Div([
+        html.H2("Limit Order Book Visualization Dashboard", style={"margin": "0", "color": "#ffffff", "fontWeight": "bold"}),
+        html.P("Asset: Extracted Features | Timeframe: Multi-day Intraday Segment",
+               style={"margin": "0", "marginTop": "5px", "color": "#d0d0d0", "fontSize": "0.95rem"})
+    ], style={"backgroundColor": "#343a40", "padding": "1.2rem", "borderRadius": "10px", "marginBottom": "1rem",
+              "boxShadow": "0 4px 8px rgba(0,0,0,0.1)"})
+
     app.layout = html.Div([
+        header_block,
+
         html.Div([
             html.Div([
                 html.P("Select LOB (Top Graph):", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
                 dcc.Dropdown(
                     id="lob_selector",
-                    options=[{"label": name, "value": name} for name in names],
+                    options=initial_lob_options,
                     value=names[0] if names else None,
-                    clearable=False
+                    clearable=False,
+                    persistence=True, persistence_type='local'
                 ),
             ], style={
                 "marginBottom": "1rem",
@@ -611,7 +763,7 @@ def main():
                         ("Trades Oppose Quotes", "Trades Oppose Quotes"),
                         ("Cancels Oppose Trades", "Cancels Oppose Trades")
                     ]],
-                    value=metric, clearable=False, style={"marginBottom": "0.5rem"}
+                    value=metric, clearable=False, persistence=True, persistence_type='local', style={"marginBottom": "0.5rem"}
                 ),
                 html.P(id="metric_description", style={"marginBottom": "1rem", "fontStyle": "italic"}),
 
@@ -619,14 +771,13 @@ def main():
                 dcc.Dropdown(
                     id="aggregation_dropdown",
                     options=[{"label": x, "value": x} for x in ["Mean", "Median", "Max", "Min", "Std"]],
-                    value=chosen_aggregation, clearable=False, style={"marginBottom": "1rem"}
+                    value=chosen_aggregation, clearable=False, persistence=True, persistence_type='local', style={"marginBottom": "1rem"}
                 ),
 
-                html.P("Select a time window for the bottom graph (in minutes) (1 - 720):",
-                       style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
+                html.P("Select a time window (minutes) (1 - 720):", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
                 dcc.Input(
                     id="time_window_input", type="number", value=time_window_aggregation, min=1, max=720, step=1,
-                    placeholder="Time Window (minutes)", style={"width": "100%", "marginBottom": "1rem"}
+                    placeholder="Time Window", persistence=True, persistence_type='local', style={"width": "100%", "marginBottom": "1rem"}
                 ),
 
                 html.P("Data Processing:", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
@@ -637,7 +788,7 @@ def main():
                         {"label": "Normalize (Min-Max)", "value": "normalize"},
                         {"label": "Percentage Change (%)", "value": "pct_change"}
                     ],
-                    value="normalize", clearable=False, style={"marginBottom": "1rem"}
+                    value="normalize", clearable=False, persistence=True, persistence_type='local', style={"marginBottom": "1rem"}
                 ),
 
                 html.P("Select bottom graph style:", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
@@ -648,18 +799,58 @@ def main():
                         {"label": " 2D Line chart", "value": "Line Chart"},
                         {"label": " 3D Line chart", "value": "3D Lines"},
                         {"label": " Horizon Chart", "value": "Horizon Chart"},
-                        {"label": " Spark Line", "value": "Spark Line"}
+                        {"label": " Spark Line", "value": "Spark Line"},
+                        {"label": " Correlation Matrix", "value": "Correlation Matrix"},
+                        {"label": " UMAP Clusters", "value": "UMAP Clusters"},
+                        {"label": " t-SNE Clusters", "value": "t-SNE Clusters"}
                     ],
-                    value="Heatmap", clearable=False, style={"marginBottom": "1rem"}
+                    value="Heatmap", clearable=False, persistence=True, persistence_type='local', style={"marginBottom": "1rem"}
                 ),
+
+                html.P("Sort Time Series By:", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
+                dcc.Dropdown(
+                    id="sort_by_dropdown",
+                    options=[
+                        {"label": "Default (Original Order)", "value": "Default"},
+                        {"label": "Alphabetical (A-Z)", "value": "Alphabetical (A-Z)"},
+                        {"label": "Alphabetical (Z-A)", "value": "Alphabetical (Z-A)"},
+                        {"label": "Correlation (Group Similar)", "value": "Correlation"}
+                    ],
+                    value="Default", clearable=False, persistence=True, persistence_type='local', style={"marginBottom": "1rem"}
+                ),
+
+                # --- INTUITIVE CORRELATION FILTER PANEL ---
+                html.P("Correlation Filter Target:", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
+                dcc.Dropdown(id="corr_reference_stock",
+                             options=[{"label": "None (Disabled)", "value": "NONE"}] + initial_lob_options,
+                             value="NONE", clearable=False, persistence=True, persistence_type='local',
+                             style={"marginBottom": "0.5rem"}),
+
+                html.Div([
+                    html.P("Correlation Range to INCLUDE:",
+                           style={"fontWeight": "bold", "marginTop": "0.5rem", "marginBottom": "0.2rem",
+                                  "fontSize": "0.85rem", "color": "#6c757d"}),
+                    html.Div([
+                        dcc.RangeSlider(
+                            id="corr_range_slider", min=-1.0, max=1.0, step=0.05, value=[0.5, 1.0],
+                            marks={-1: '-1', -0.5: '-0.5', 0: '0', 0.5: '0.5', 1: '1'},
+                            tooltip={"placement": "bottom", "always_visible": True}
+                        )
+                    ], style={"padding": "0 10px", "marginBottom": "0.8rem"}),
+                    html.Div(id="corr_live_preview",
+                             style={"fontSize": "0.85rem", "fontStyle": "italic", "color": "#17a2b8",
+                                    "textAlign": "center", "marginBottom": "1rem"})
+                ], id="corr_filter_controls_container", style={"display": "none"}),
+                # ------------------------------------------
 
                 html.P("Filter Time Series:", style={"fontWeight": "bold", "marginBottom": "0.5rem"}),
                 dcc.Dropdown(
                     id="timeseries_selector",
-                    options=[{"label": name, "value": name} for name in names],
-                    value=names.copy(),  # default = all selected
+                    options=initial_lob_options,
+                    value=names.copy(),
                     multi=True,
                     placeholder="Select time series...",
+                    persistence=True, persistence_type='local',
                     style={"marginBottom": "0.5rem"}
                 ),
                 html.Div([
@@ -681,26 +872,109 @@ def main():
                 }),
             ], style={
                 "flex": "0 0 300px", "padding": "0.5rem", "boxShadow": "0 4px 8px rgba(0,0,0,0.1)",
-                "borderRadius": "10px", "backgroundColor": "#ffffff", "minWidth": "250px"
+                "borderRadius": "10px", "backgroundColor": "#ffffff", "minWidth": "250px", "position": "sticky", "top": "1rem"
             }),
 
             html.Div([
-                dcc.Loading(
+                dcc.Loading(html.Div([
+                    html.Div([
+                        html.P("t-SNE Perplexity:",
+                               style={"fontWeight": "bold", "marginBottom": "0.2rem", "fontSize": "0.9rem"}),
+                        dcc.Slider(id="tsne_perplexity", min=2, max=50, step=1, value=30, marks={2: '2', 50: '50'},
+                                   tooltip={"placement": "bottom", "always_visible": True}, updatemode='mouseup'),
+                    ], id="tsne_params",
+                        style={"display": "none", "position": "absolute", "top": "70px", "left": "15px",
+                               "width": "280px", "zIndex": "1000", "background": "rgba(255,255,255,0.9)",
+                               "padding": "10px", "borderRadius": "8px", "boxShadow": "0 2px 5px rgba(0,0,0,0.2)",
+                               "border": "1px solid #dee2e6"}),
+
+                    html.Div([
+                        html.P("UMAP Neighbors:",
+                               style={"fontWeight": "bold", "marginBottom": "0.2rem", "fontSize": "0.9rem"}),
+                        dcc.Slider(id="umap_neighbors", min=2, max=50, step=1, value=15, marks={2: '2', 50: '50'},
+                                   tooltip={"placement": "bottom", "always_visible": True}, updatemode='mouseup'),
+                        html.P("UMAP Min Distance:",
+                               style={"fontWeight": "bold", "marginBottom": "0.2rem", "marginTop": "0.8rem",
+                                      "fontSize": "0.9rem"}),
+                        dcc.Slider(id="umap_min_dist", min=0.0, max=0.99, step=0.05, value=0.1, marks={0: '0', 1: '1'},
+                                   tooltip={"placement": "bottom", "always_visible": True}, updatemode='mouseup'),
+                    ], id="umap_params",
+                        style={"display": "none", "position": "absolute", "top": "70px", "left": "15px",
+                               "width": "280px", "zIndex": "1000", "background": "rgba(255,255,255,0.9)",
+                               "padding": "10px", "borderRadius": "8px", "boxShadow": "0 2px 5px rgba(0,0,0,0.2)",
+                               "border": "1px solid #dee2e6"}),
+
                     dcc.Graph(
                         id="bottom_graph", figure=bottom_fig, clear_on_unhover=True,
                         config={"toImageButtonOptions": {"format": "png", "filename": "bottom_graph", "width": 1920,
                                                          "height": 1080, "scale": 3}}
-                    ), type="circle"
-                )
+                    )
+                ], style={"position": "relative", "width": "100%", "height": "100%"}), type="circle")
             ], style={
                 "flex": "1", "marginLeft": "1rem", "padding": "0.5rem", "boxShadow": "0 4px 8px rgba(0,0,0,0.1)",
-                "borderRadius": "10px", "backgroundColor": "#f9f9f9", "minWidth": "0"
+                "borderRadius": "10px", "backgroundColor": "#f9f9f9", "minWidth": "0", "maxHeight": "100vh", "overflowY": "auto"
             })
         ], style={"display": "flex", "flexWrap": "nowrap", "alignItems": "flex-start", "gap": "1rem"}),
 
         html.Div(id="dummy-clientside-output", style={"display": "none"})
 
     ], style={"padding": "0.5rem", "fontFamily": "Arial, sans-serif", "backgroundColor": "#f0f2f5"})
+
+    # --- CALLBACKS ---
+
+    @app.callback(
+        [Output("corr_filter_controls_container", "style"),
+         Output("corr_live_preview", "children")],
+        [Input("corr_reference_stock", "value"),
+         Input("corr_range_slider", "value"),
+         Input("timeseries_selector", "value")],
+        [State("metric_dropdown", "value"),
+         State("aggregation_dropdown", "value"),
+         State("time_window_input", "value")]
+    )
+    def update_corr_ui_and_preview(corr_ref_stock, inclusion_range, selected_timeseries, selected_metric,
+                                   selected_aggregation, selected_time_window):
+        if not corr_ref_stock or corr_ref_stock == "NONE":
+            return {"display": "none"}, ""
+
+        if not selected_timeseries:
+            return {"display": "block"}, "No items selected in filter."
+
+        selected_time_window_sec = (selected_time_window or 60) * MINUTE_SEC
+        new_z = aggregate_data(all_data, metric=selected_metric,
+                                  aggregation=aggregation_functions_map[selected_aggregation],
+                                  time_window=selected_time_window_sec)
+
+        ref_idx = names.index(corr_ref_stock)
+        ref_z_filled = np.nan_to_num(new_z[ref_idx], nan=0.0) + np.random.normal(0, 1e-9, new_z[ref_idx].shape)
+
+        selected_indices = [i for i, n in enumerate(names) if n in selected_timeseries]
+
+        match_count = 0
+        for idx in selected_indices:
+            if names[idx] == corr_ref_stock:
+                match_count += 1
+                continue
+            target_z_filled = np.nan_to_num(new_z[idx], nan=0.0) + np.random.normal(0, 1e-9, new_z[idx].shape)
+            corr = np.corrcoef(ref_z_filled, target_z_filled)[0, 1]
+            if inclusion_range[0] <= corr <= inclusion_range[1]:
+                match_count += 1
+
+        return {"display": "block"}, f"Preview: Keeping {match_count} of {len(selected_timeseries)} items."
+
+
+    @app.callback(
+        [Output("tsne_params", "style"), Output("umap_params", "style")],
+        Input("graph_type_dropdown", "value"),
+        State("tsne_params", "style"), State("umap_params", "style")
+    )
+    def toggle_cluster_params(gtype, current_tsne_style, current_umap_style):
+        tsne_style = current_tsne_style.copy() if current_tsne_style else {}
+        tsne_style["display"] = "block" if gtype == "t-SNE Clusters" else "none"
+        umap_style = current_umap_style.copy() if current_umap_style else {}
+        umap_style["display"] = "block" if gtype == "UMAP Clusters" else "none"
+        return tsne_style, umap_style
+
 
     @app.callback(
         Output("timeseries_selector", "value"),
@@ -769,78 +1043,160 @@ def main():
         Input("graph_type_dropdown", "value"),
         Input("data_processing_dropdown", "value"),
         Input("timeseries_selector", "value"),
+        Input("sort_by_dropdown", "value"),
+        Input("tsne_perplexity", "value"),
+        Input("umap_neighbors", "value"),
+        Input("umap_min_dist", "value"),
+        State("corr_reference_stock", "value"),
+        State("corr_range_slider", "value"),
         State("metric_dropdown", "value"),
         State("aggregation_dropdown", "value"),
         State("time_window_input", "value"),
         State("bottom_graph", "figure"),
     )
     def update_bottom_graph(update_bottom_graph_button, selected_graph_type, data_processing,
-                            selected_timeseries, selected_metric, selected_aggregation, selected_time_window,
-                            bottom_fig):
-        global last_update_bottom_graph_click_count, last_graph_type, last_data_processing_state
+                            selected_timeseries, sort_by, tsne_perp, umap_neigh, umap_dist,
+                            corr_ref_stock, corr_range, selected_metric, selected_aggregation,
+                            selected_time_window, bottom_fig):
+        global last_update_bottom_graph_click_count, last_graph_type, last_data_processing_state, last_sort_by_state
+        global last_corr_ref_state, last_corr_range_state
         updated = False
 
         ctx = dash.callback_context
         if not ctx.triggered: return dash.no_update
         trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-        if trigger_id in ["update_bottom_graph_button", "graph_type_dropdown", "data_processing_dropdown",
-                          "timeseries_selector"]:
-            if trigger_id == "update_bottom_graph_button" and last_update_bottom_graph_click_count == update_bottom_graph_button and selected_graph_type == last_graph_type and data_processing == last_data_processing_state:
-                pass
-            else:
-                last_update_bottom_graph_click_count = update_bottom_graph_button
-                last_graph_type = selected_graph_type
-                last_data_processing_state = data_processing
+        if trigger_id not in ["update_bottom_graph_button", "graph_type_dropdown", "data_processing_dropdown",
+                              "timeseries_selector", "sort_by_dropdown", "tsne_perplexity", "umap_neighbors",
+                              "umap_min_dist", ""]:
+            return dash.no_update
 
-                selected_time_window_sec = selected_time_window * MINUTE_SEC
-                new_x = [f"{int(i // HOUR_SEC):02d}:{int(i % HOUR_SEC // MINUTE_SEC):02d}" for i in
-                         range(0, DAY_SEC, selected_time_window_sec)]
-                new_z = aggregate_data(all_data, metric=selected_metric,
-                                       aggregation=aggregation_functions_map[selected_aggregation],
-                                       time_window=selected_time_window_sec)
+        if (trigger_id == "update_bottom_graph_button" and
+                last_update_bottom_graph_click_count == update_bottom_graph_button and
+                selected_graph_type == last_graph_type and
+                data_processing == last_data_processing_state and
+                sort_by == last_sort_by_state and
+                corr_ref_stock == last_corr_ref_state and
+                corr_range == last_corr_range_state):
+            return dash.no_update
 
-                if data_processing == "normalize":
-                    new_z = normalize_data(new_z)
-                elif data_processing == "pct_change":
-                    new_z = pct_change_data(new_z)
+        last_update_bottom_graph_click_count = update_bottom_graph_button
+        last_graph_type = selected_graph_type
+        last_data_processing_state = data_processing
+        last_sort_by_state = sort_by
+        last_corr_ref_state = corr_ref_stock
+        last_corr_range_state = corr_range
 
-                # --- FILTERING ---
-                if selected_timeseries:
-                    selected_indices = [i for i, n in enumerate(names) if n in selected_timeseries]
-                    filtered_names = [names[i] for i in selected_indices]
-                    filtered_z = np.array(new_z)[selected_indices]
-                else:
-                    filtered_names = []
-                    filtered_z = np.array([])
+        selected_time_window_sec = selected_time_window * MINUTE_SEC
+        new_x = [f"{int(i // HOUR_SEC):02d}:{int(i % HOUR_SEC // MINUTE_SEC):02d}" for i in
+                 range(0, DAY_SEC, selected_time_window_sec)]
+        new_z = aggregate_data(all_data, metric=selected_metric,
+                               aggregation=aggregation_functions_map[selected_aggregation],
+                               time_window=selected_time_window_sec)
 
-                current_range = None
-                if bottom_fig and isinstance(bottom_fig, dict) and "layout" in bottom_fig and "xaxis" in bottom_fig[
-                    "layout"] and "range" in bottom_fig["layout"]["xaxis"]:
-                    current_range = bottom_fig["layout"]["xaxis"]["range"]
-                elif bottom_fig and hasattr(bottom_fig, "layout") and hasattr(bottom_fig.layout, "xaxis") and hasattr(
-                        bottom_fig.layout.xaxis, "range"):
-                    current_range = bottom_fig.layout.xaxis.range
+        if data_processing == "normalize":
+            new_z = normalize_data(new_z)
+        elif data_processing == "pct_change":
+            new_z = pct_change_data(new_z)
 
-                bottom_fig = create_bottom_figure(
-                    filtered_z,
-                    new_x,
-                    filtered_names,
-                    selected_graph_type,
-                    selected_metric,
-                    selected_aggregation,
-                    data_processing
-                )
+        # --- FILTERING ---
+        if selected_timeseries:
+            selected_indices = [i for i, n in enumerate(names) if n in selected_timeseries]
+            filtered_names = [names[i] for i in selected_indices]
+            filtered_z = np.array(new_z)[selected_indices]
 
-                if trigger_id != "update_bottom_graph_button" and current_range:
-                    if selected_graph_type == "3D Lines":
-                        bottom_fig.update_layout(scene=dict(xaxis={"range": current_range}))
-                    else:
-                        bottom_fig.update_layout(xaxis={"range": current_range})
-                updated = True
+            # --- CORRELATION FILTERING ---
+            if corr_ref_stock and corr_ref_stock != "NONE" and corr_ref_stock in names:
+                ref_idx = names.index(corr_ref_stock)
+                ref_z = np.array(new_z)[ref_idx]
+                ref_z_filled = np.nan_to_num(ref_z, nan=0.0) + np.random.normal(0, 1e-9, ref_z.shape)
+
+                new_filtered_names = []
+                new_filtered_z = []
+
+                c_neg, c_pos = corr_range
+
+                for i, name in enumerate(filtered_names):
+                    if name == corr_ref_stock:
+                        new_filtered_names.append(name)
+                        new_filtered_z.append(filtered_z[i])
+                        continue
+
+                    target_z_filled = np.nan_to_num(filtered_z[i], nan=0.0) + np.random.normal(0, 1e-9,
+                                                                                               filtered_z[i].shape)
+                    corr = np.corrcoef(ref_z_filled, target_z_filled)[0, 1]
+
+                    # Keep if inside the inclusion bounds
+                    if c_neg <= corr <= c_pos:
+                        new_filtered_names.append(name)
+                        new_filtered_z.append(filtered_z[i])
+
+                filtered_names = new_filtered_names
+                filtered_z = np.array(new_filtered_z) if new_filtered_z else np.array([])
+
+            # --- SORTING ---
+            if sort_by == "Alphabetical (A-Z)" and len(filtered_z) > 0:
+                sort_idx = np.argsort(filtered_names)
+                filtered_names = [filtered_names[i] for i in sort_idx]
+                filtered_z = filtered_z[sort_idx]
+            elif sort_by == "Alphabetical (Z-A)" and len(filtered_z) > 0:
+                sort_idx = np.argsort(filtered_names)[::-1]
+                filtered_names = [filtered_names[i] for i in sort_idx]
+                filtered_z = filtered_z[sort_idx]
+            elif sort_by == "Correlation" and len(filtered_z) > 1:
+                z_filled = np.nan_to_num(filtered_z, nan=0.0) + np.random.normal(0, 1e-9, filtered_z.shape)
+                corr_matrix = np.corrcoef(z_filled)
+                unvisited = set(range(len(filtered_names)))
+
+                start_idx = 0
+                sort_idx = [start_idx]
+                unvisited.remove(start_idx)
+                curr_idx = start_idx
+
+                while unvisited:
+                    next_idx = max(unvisited, key=lambda i: corr_matrix[curr_idx, i])
+                    sort_idx.append(next_idx)
+                    unvisited.remove(next_idx)
+                    curr_idx = next_idx
+
+                filtered_names = [filtered_names[i] for i in sort_idx]
+                filtered_z = filtered_z[sort_idx]
+
+        else:
+            filtered_names = []
+            filtered_z = np.array([])
+
+        current_range = None
+        if bottom_fig and isinstance(bottom_fig, dict) and "layout" in bottom_fig and "xaxis" in bottom_fig[
+            "layout"] and "range" in bottom_fig["layout"]["xaxis"]:
+            current_range = bottom_fig["layout"]["xaxis"]["range"]
+        elif bottom_fig and hasattr(bottom_fig, "layout") and hasattr(bottom_fig.layout, "xaxis") and hasattr(
+                bottom_fig.layout.xaxis, "range"):
+            current_range = bottom_fig.layout.xaxis.range
+
+        bottom_fig = create_bottom_figure(
+            filtered_z,
+            new_x,
+            filtered_names,
+            selected_graph_type,
+            selected_metric,
+            selected_aggregation,
+            data_processing,
+            tsne_perp,
+            umap_neigh,
+            umap_dist
+        )
+
+        if trigger_id not in ["update_bottom_graph_button", "graph_type_dropdown"] and current_range:
+            if selected_graph_type == "3D Lines":
+                bottom_fig.update_layout(scene=dict(xaxis={"range": current_range}))
+            elif selected_graph_type not in ["Correlation Matrix", "UMAP Clusters", "t-SNE Clusters"]:
+                bottom_fig.update_layout(xaxis={"range": current_range})
+        updated = True
 
         return bottom_fig if updated else dash.no_update
 
+    # --- CLIENTSIDE CALLBACK FOR MULTI-SELECT LEGEND HIGHLIGHTING ---
     app.clientside_callback(
         """
         function(figure) {
@@ -850,40 +1206,98 @@ def main():
                 const plot = graph.querySelector('.js-plotly-plot');
                 if (!plot) return;
 
-                function attachLegendHover() {
+                plot._selectedTraces = new Set();
+                plot._originalColors = null;
+
+                function updateStyles(hoveredIndex = -1) {
+                    const traceCount = plot.data.length;
+                    const isCluster = traceCount > 0 && (plot.data[0].mode === 'markers+text' || plot.data[0].mode === 'markers');
+
+                    if (!isCluster && !plot._originalColors) {
+                        plot._originalColors = plot._fullData.map(t => (t.line || {}).color || '#000000');
+                    }
+
+                    let update = { opacity: [] };
+                    if (!isCluster) update.line = [];
+
+                    const hasSelection = plot._selectedTraces.size > 0;
+                    const anyActive = hasSelection || hoveredIndex !== -1;
+
+                    for (let i = 0; i < traceCount; i++) {
+                        const isActive = plot._selectedTraces.has(i) || i === hoveredIndex;
+                        const is3D = !isCluster && plot.data[i].type === 'scatter3d';
+
+                        if (!anyActive) {
+                            update.opacity.push(1);
+                            if (!isCluster) {
+                                let origWidth = is3D ? 4 : 2;
+                                update.line.push({ width: origWidth, color: plot._originalColors[i] });
+                            }
+                        } else if (isActive) {
+                            update.opacity.push(1);
+                            if (!isCluster) {
+                                let activeWidth = is3D ? 8 : 5;
+                                update.line.push({ width: activeWidth, color: plot._originalColors[i] });
+                            }
+                        } else {
+                            update.opacity.push(is3D ? 0.4 : 0.25);
+                            if (!isCluster) {
+                                let unselectedWidth = is3D ? 2.5 : 1.5;
+                                update.line.push({ width: unselectedWidth, color: "rgba(130,130,130,0.9)" });
+                            }
+                        }
+                    }
+
+                    Plotly.restyle(plot, update).then(() => {
+                        if (isCluster || traceCount === 0 || plot.data[0].type === 'scatter3d') return; 
+                        const scatterLayer = plot.querySelector('.scatterlayer');
+                        if (scatterLayer) {
+                            const traces = Array.from(scatterLayer.querySelectorAll('.trace.scatter'));
+                            const uidToIndex = {};
+                            (plot._fullData || plot.data).forEach((t, idx) => {
+                                if (t.uid) uidToIndex[t.uid] = idx;
+                            });
+
+                            traces.forEach(node => {
+                                const className = node.getAttribute('class') || '';
+                                let originalIdx = -1;
+                                for (let uid in uidToIndex) {
+                                    if (className.includes(uid)) {
+                                        originalIdx = uidToIndex[uid];
+                                        break;
+                                    }
+                                }
+                                if (originalIdx !== -1) {
+                                    if (plot._selectedTraces.has(originalIdx) || originalIdx === hoveredIndex) {
+                                        scatterLayer.appendChild(node);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+
+                function attachLegendEvents() {
                     const legendItems = plot.querySelectorAll('.legend .traces');
                     if (!legendItems.length) return;
+
                     legendItems.forEach((item, index) => {
-                        item.onmouseenter = function() {
-                            const traceCount = plot.data.length;
-                            if (!plot._originalColors) plot._originalColors = plot.data.map(t => t.line?.color || null);
-                            let update = { opacity: [], line: [] };
-                            for (let i = 0; i < traceCount; i++) {
-                                if (i === index) {
-                                    update.opacity.push(1);
-                                    update.line.push({ width: 5, color: plot._originalColors[i] });
-                                } else {
-                                    update.opacity.push(0.3);
-                                    update.line.push({ width: 1.5, color: "rgba(180,180,180,0.7)" });
-                                }
-                            }
-                            Plotly.restyle(plot, update);
-                        };
-                        item.onmouseleave = function() {
-                            const traceCount = plot.data.length;
-                            let update = { opacity: [], line: [] };
-                            for (let i = 0; i < traceCount; i++) {
-                                update.opacity.push(1);
-                                update.line.push({ width: 2, color: plot._originalColors ? plot._originalColors[i] : null });
-                            }
-                            Plotly.restyle(plot, update);
+                        item.onmouseenter = null; item.onmouseleave = null; item.onclick = null;
+                        item.onmouseenter = function() { updateStyles(index); };
+                        item.onmouseleave = function() { updateStyles(-1); };
+                        item.onclick = function(e) {
+                            e.stopPropagation(); e.preventDefault();
+                            if (plot._selectedTraces.has(index)) plot._selectedTraces.delete(index);
+                            else plot._selectedTraces.add(index);
+                            updateStyles(index);
                         };
                     });
                 }
-                attachLegendHover();
-                if (!plot._legendHoverAttached) {
-                    plot.on('plotly_afterplot', attachLegendHover);
-                    plot._legendHoverAttached = true;
+
+                attachLegendEvents();
+                if (!plot._legendEventsAttached) {
+                    plot.on('plotly_afterplot', attachLegendEvents);
+                    plot._legendEventsAttached = true;
                 }
             }, 300);
             return window.dash_clientside.no_update;
@@ -894,6 +1308,7 @@ def main():
         prevent_initial_call=False
     )
 
+    print(f"Starting server at http://{HOST_ADDRESS}:{PORT}")
     app.run(host=HOST_ADDRESS, port=PORT, debug=False)
 
 
