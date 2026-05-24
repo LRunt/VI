@@ -1,0 +1,8 @@
+dash>=2.18.0
+dash-bootstrap-components>=1.6.0
+plotly>=5.24.0
+plotly-resampler>=0.10.0
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.5.0
+umap-learn>=0.5.6
