@@ -64,6 +64,49 @@ run_zappe_extended_work.bat
     - preprocessing - Contains script for update data with column mid price
     - timeseries_generation - Constains script for generating random time series data
     - zappe_work_extension - Contains an extension of Dominik Zappe's work with relevant extensions
+- img: Screenshots
 
 ## Screenshots
 
+### Application
+![Applications](/img/AppScreen.png)
+
+### Heatmap
+
+![Heatmap](/img/Heatmap.png)
+
+### 2D Chart
+
+![2D chart](/img/2D-chart.png)
+
+### 3D Chart
+
+![3D chart](/img/3D-Plot-highlight.png)
+
+### Sparkline Chart
+
+![Sparkline](/img/Spartlinechart.png)
+
+### Horizon Chart
+
+![Horizon chart](/img/horizon%20Chart.png)
+
+### Correlation matrix
+
+![Correlation matrix](/img/Correlation%20matrix.png)
+
+### UMAP
+
+![UMAP](/img/UMAP.png)
+
+### t-SNE
+
+![t-SNE](/img/t-SNE.png)
+
+### Controls
+
+![Controls](/img/Controls.png)
+
+## Other
+
+[GitHub repository](https://github.com/LRunt/VI)

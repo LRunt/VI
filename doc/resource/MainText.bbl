@@ -1,0 +1,120 @@
+\begin{thebibliography}{12}
+\expandafter\ifx\csname natexlab\endcsname\relax\def\natexlab#1{#1}\fi
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\href}[2]{#2}
+\providecommand{\path}[1]{#1}
+\providecommand{\DOIprefix}{doi:}
+\providecommand{\ArXivprefix}{arXiv:}
+\providecommand{\URLprefix}{URL: }
+\providecommand{\Pubmedprefix}{pmid:}
+\providecommand{\doi}[1]{\href{http://dx.doi.org/#1}{\path{#1}}}
+\providecommand{\Pubmed}[1]{\href{pmid:#1}{\path{#1}}}
+\providecommand{\bibinfo}[2]{#2}
+\ifx\xfnm\relax \def\xfnm[#1]{\unskip,\space#1}\fi
+%Type = Article
+\bibitem[{Álvaro Cartea et~al.(2020)Álvaro Cartea, Jaimungal, and
+  Wang}]{Cartea2020}
+\bibinfo{author}{Álvaro Cartea}, \bibinfo{author}{S.~Jaimungal},
+  \bibinfo{author}{Y.~Wang},
+\newblock \bibinfo{title}{Spoofing and price manipulation in order-driven
+  markets},
+\newblock \bibinfo{journal}{Applied Mathematical Finance} \bibinfo{volume}{27}
+  (\bibinfo{year}{2020}) \bibinfo{pages}{67 -- 98}.
+  \DOIprefix\doi{https://doi.org/10.1080/1350486X.2020.1741595}.
+%Type = Article
+\bibitem[{Zappe(2025)}]{Zappe2025}
+\bibinfo{author}{D.~Zappe},
+\newblock \bibinfo{title}{Multidimensional dynamic visualization of stock limit
+  order books},
+\newblock \bibinfo{journal}{Preprint submitted to KIV/VI - Information
+  Visualization}  (\bibinfo{year}{2025}). \URLprefix
+  \url{zapped99@students.zcu.cz}.
+%Type = Article
+\bibitem[{Bach et~al.(2014)Bach, Dragicevic, Archambault, Hurter, and
+  Carpendale}]{bach2014review}
+\bibinfo{author}{B.~Bach}, \bibinfo{author}{P.~Dragicevic},
+  \bibinfo{author}{D.~Archambault}, \bibinfo{author}{C.~Hurter},
+  \bibinfo{author}{S.~Carpendale},
+\newblock \bibinfo{title}{A review of temporal data visualizations based on
+  space-time cube operations},
+\newblock \bibinfo{journal}{Eurographics Conference on Visualization (EuroVis)
+  - STARs}  (\bibinfo{year}{2014}).
+%Type = Book
+\bibitem[{Zhu(2012)}]{zhu2012visualizing}
+\bibinfo{author}{X.~Zhu}, \bibinfo{title}{Visualizing Financial Data},
+  \bibinfo{publisher}{John Wiley \& Sons}, \bibinfo{year}{2012}.
+%Type = Book
+\bibitem[{Tufte(2006)}]{tufte2006beautiful}
+\bibinfo{author}{E.~R. Tufte}, \bibinfo{title}{Beautiful evidence},
+  \bibinfo{publisher}{Graphics Press Cheshire, CT}, \bibinfo{year}{2006}.
+%Type = Article
+\bibitem[{Javed et~al.(2010)Javed, McDonnel, and Elmqvist}]{javed2010graphical}
+\bibinfo{author}{W.~Javed}, \bibinfo{author}{B.~McDonnel},
+  \bibinfo{author}{N.~Elmqvist},
+\newblock \bibinfo{title}{Graphical perception of multiple time series},
+\newblock \bibinfo{journal}{IEEE Transactions on Visualization and Computer
+  Graphics} \bibinfo{volume}{16} (\bibinfo{year}{2010})
+  \bibinfo{pages}{927--934}. \URLprefix
+  \url{https://doi.org/10.1109/TVCG.2010.162}.
+  \DOIprefix\doi{10.1109/TVCG.2010.162}.
+%Type = Inproceedings
+\bibitem[{Saito et~al.(2005)Saito, Miyamura, Yamamoto, Saito, Hoshiya, and
+  Kaseda}]{saito2005two}
+\bibinfo{author}{T.~Saito}, \bibinfo{author}{H.~N. Miyamura},
+  \bibinfo{author}{M.~Yamamoto}, \bibinfo{author}{H.~Saito},
+  \bibinfo{author}{Y.~Hoshiya}, \bibinfo{author}{T.~Kaseda},
+\newblock \bibinfo{title}{Two-tone pseudo coloring: Compact visualization for
+  one-dimensional data},
+\newblock in: \bibinfo{booktitle}{IEEE Symposium on Information Visualization
+  (INFOVIS)}, \bibinfo{organization}{IEEE}, \bibinfo{year}{2005}, pp.
+  \bibinfo{pages}{173--180}. \URLprefix
+  \url{https://doi.org/10.1109/INFVIS.2005.1532144}.
+  \DOIprefix\doi{10.1109/INFVIS.2005.1532144}.
+%Type = Inproceedings
+\bibitem[{Heer et~al.(2009)Heer, Kong, and Agrawala}]{heer2009crowdsourcing}
+\bibinfo{author}{J.~Heer}, \bibinfo{author}{N.~Kong},
+  \bibinfo{author}{M.~Agrawala},
+\newblock \bibinfo{title}{Sizing the horizon: The effects of chart size and
+  layering on the graphical perception of time series visualizations},
+\newblock in: \bibinfo{booktitle}{Proceedings of the SIGCHI Conference on Human
+  Factors in Computing Systems}, \bibinfo{organization}{ACM},
+  \bibinfo{year}{2009}, pp. \bibinfo{pages}{1303--1312}. \URLprefix
+  \url{https://doi.org/10.1145/1518701.1518897}.
+  \DOIprefix\doi{10.1145/1518701.1518897}.
+%Type = Inproceedings
+\bibitem[{Ghoniem et~al.(2004)Ghoniem, Fekete, and
+  Castagliola}]{ghoniem2004readability}
+\bibinfo{author}{M.~Ghoniem}, \bibinfo{author}{J.-D. Fekete},
+  \bibinfo{author}{P.~Castagliola},
+\newblock \bibinfo{title}{A comparison of the readability of graphs using
+  node-link and matrix-based representations},
+\newblock in: \bibinfo{booktitle}{IEEE Symposium on Information Visualization},
+  \bibinfo{organization}{IEEE}, \bibinfo{year}{2004}, pp.
+  \bibinfo{pages}{17--24}. \URLprefix
+  \url{https://doi.org/10.1109/INFVIS.2004.1}.
+  \DOIprefix\doi{10.1109/INFVIS.2004.1}.
+%Type = Article
+\bibitem[{Shao et~al.(2016)Shao, Mahlow, Schreck, and Bak}]{shao2016visual}
+\bibinfo{author}{L.~Shao}, \bibinfo{author}{C.~Mahlow},
+  \bibinfo{author}{T.~Schreck}, \bibinfo{author}{P.~Bak},
+\newblock \bibinfo{title}{Visual analytics for financial data},
+\newblock \bibinfo{journal}{Eurographics Conference on Visualization (EuroVis)
+  - STARs}  (\bibinfo{year}{2016}).
+%Type = Article
+\bibitem[{Van~der Maaten and Hinton(2008)}]{vandermaaten2008visualizing}
+\bibinfo{author}{L.~Van~der Maaten}, \bibinfo{author}{G.~Hinton},
+\newblock \bibinfo{title}{Visualizing data using t-sne},
+\newblock \bibinfo{journal}{Journal of Machine Learning Research}
+  \bibinfo{volume}{9} (\bibinfo{year}{2008}) \bibinfo{pages}{2579--2605}.
+  \URLprefix
+  \url{https://www.jmlr.org/papers/volume9/vandermaaten08a/vandermaaten08a.pdf}.
+%Type = Article
+\bibitem[{McInnes et~al.(2018)McInnes, Healy, and Melville}]{mcinnes2018umap}
+\bibinfo{author}{L.~McInnes}, \bibinfo{author}{J.~Healy},
+  \bibinfo{author}{J.~Melville},
+\newblock \bibinfo{title}{Umap: Uniform manifold approximation and projection
+  for dimension reduction},
+\newblock \bibinfo{journal}{arXiv preprint arXiv:1802.03426}
+  (\bibinfo{year}{2018}). \URLprefix \url{https://arxiv.org/abs/1802.03426}.
+
+\end{thebibliography}
